@@ -1,0 +1,153 @@
+import { Slider, ComboBox, ListView } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    // Proprietà in entrata da Rust
+    in property <[string]> categories;
+    in property <[[string]]> symbol-rows;
+    in property <string> status-text: "Pronto";
+    
+    // Proprietà gestite dall'interfaccia
+    out property <int> selected-index: 0;
+    in-out property <length> symbol-size: 60px;
+    
+    // Segnali per Rust
+    callback category-changed(int);
+    callback symbol-clicked(string);
+
+    title: "SMuFL Explorer Pro";
+    min-width: 900px;
+    min-height: 700px;
+    background: #1a1a1a;
+    default-font-family: "Finale Maestro";
+
+    VerticalLayout {
+        padding: 25px;
+        spacing: 15px;
+
+        // --- HEADER ---
+        // Usiamo un HorizontalLayout per tenere titolo a sinistra e selettore a destra
+        HorizontalLayout {
+            height: 60px;
+            
+            VerticalLayout {
+                alignment: center;
+                Text { 
+                    text: "SMuFL Explorer"; 
+                    font-size: 22px; 
+                    color: white; 
+                    font-weight: 800; 
+                }
+                Text { 
+                    text: status-text; 
+                    color: #4CAF50; 
+                    font-size: 13px; 
+                    font-weight: 500;
+                }
+            }
+
+            // Questo rettangolo vuoto funge da molla (spacer)
+            Rectangle { }
+
+            // Selettore Categoria: limitiamo la larghezza qui
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                
+                Text { 
+                    text: "CATEGORIA"; 
+                    color: #777; 
+                    font-size: 10px; 
+                    font-weight: 800;
+                    horizontal-alignment: right;
+                }
+                
+                Rectangle {
+                    width: 380px;
+                    height: 36px;
+                    background: #2a2a2a;
+                    border-radius: 4px;
+                    
+                    ComboBox {
+                        width: 100%;
+                        height: 100%;
+                        model: root.categories;
+                        current-index <=> root.selected-index;
+                        selected => { root.category-changed(self.current-index); }
+                    }
+                }
+            }
+        }
+
+        // --- GRIGLIA SIMBOLI (VIRTUALIZZATA) ---
+        Rectangle {
+            background: #212121;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #333;
+            clip: true; // Fondamentale per la ListView
+            
+            ListView {
+                for row in root.symbol-rows : HorizontalLayout {
+                    padding: 10px;
+                    spacing: 12px;
+                    alignment: start; // Mantiene i simboli a sinistra se la riga non è piena
+                    
+                    for sym in row : Rectangle {
+                        width: root.symbol-size;
+                        height: root.symbol-size;
+                        background: touch.has-hover ? #3d3d3d : #2d2d2d;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: touch.has-hover ? #555 : transparent;
+                        
+                        // Transizione morbida del colore (opzionale)
+                        animate background { duration: 150ms; }
+
+                        Text {
+                            text: sym;
+                            font-size: root.symbol-size * 0.75;
+                            color: touch.has-hover ? #00ff00 : #eee;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        
+                        touch := TouchArea {
+                            clicked => { root.symbol-clicked(sym); }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // --- FOOTER ---
+        HorizontalLayout {
+            height: 40px;
+            spacing: 20px;
+            alignment: center;
+
+            Text { 
+                text: "Dimensione icone:"; 
+                vertical-alignment: center; 
+                color: #666; 
+                font-size: 12px; 
+            }
+
+            Slider {
+                width: 250px;
+                minimum: 35;
+                maximum: 150;
+                value: root.symbol-size / 1px;
+                changed(v) => { root.symbol-size = v * 1px; }
+            }
+
+            Text { 
+                text: round(root.symbol-size / 1px) + "px"; 
+                width: 45px;
+                vertical-alignment: center; 
+                color: #aaa; 
+                font-size: 13px;
+                font-weight: 600;
+            }
+        }
+    }
+}
