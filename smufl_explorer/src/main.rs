@@ -1,14 +1,14 @@
 slint::include_modules!();
+
 use arboard::Clipboard;
-use slint::{ModelRc, SharedString, VecModel};
+use slint::{Model, ModelRc, SharedString, VecModel};
+use std::cell::RefCell;
 use std::rc::Rc;
 
-fn main() -> Result<(), slint::PlatformError> {
-    let ui = AppWindow::new()?;
-    let mut clipboard = Clipboard::new().ok();
-
-    // Database completo dei range SMuFL
-    let ranges = [
+// FIX: Static data instead of a large stack-allocated local array.
+// This avoids unnecessary stack usage and makes the data available
+// without being captured by value into closures.
+static RANGES: &[(&str, u32, u32)] = &[
     ("All ranges (U+E000–U+F3FF)", 0xE000, 0xF3FF),
     ("Staff brackets and dividers (U+E000–U+E00F)", 0xE000, 0xE00F),
     ("Staves (U+E010–U+E02F)", 0xE010, 0xE02F),
@@ -143,55 +143,124 @@ fn main() -> Result<(), slint::PlatformError> {
     ("Scale degrees (U+EF00–U+EF0F)", 0xEF00, 0xEF0F),
 ];
 
-    // Invia i nomi delle categorie alla ComboBox
-    let cat_names: Vec<SharedString> = ranges.iter().map(|r| r.0.into()).collect();
+/// Builds the symbol grid rows for a given Unicode range.
+/// Each row contains up to COLS symbols as SharedStrings.
+fn build_rows(start: u32, end: u32) -> Vec<ModelRc<SharedString>> {
+    const COLS: usize = 10;
+
+    let symbols: Vec<SharedString> = (start..=end)
+        .filter_map(char::from_u32)
+        .map(|c| SharedString::from(c.to_string()))
+        .collect();
+
+    symbols
+        .chunks(COLS)
+        .map(|chunk| {
+            let row: Vec<SharedString> = chunk.to_vec();
+            ModelRc::from(Rc::new(VecModel::from(row)))
+        })
+        .collect()
+}
+
+fn main() -> Result<(), slint::PlatformError> {
+    let ui = AppWindow::new()?;
+
+    // FIX: Wrap Clipboard in Rc<RefCell<>> so it can be safely shared
+    // across multiple closures without move conflicts.
+    // Clipboard does not implement Send, so this single-threaded pattern is correct.
+    let clipboard: Rc<RefCell<Option<Clipboard>>> =
+        Rc::new(RefCell::new(Clipboard::new().ok()));
+
+    // Send category names to the ComboBox
+    let cat_names: Vec<SharedString> = RANGES.iter().map(|r| r.0.into()).collect();
     ui.set_categories(ModelRc::from(Rc::new(VecModel::from(cat_names))));
 
+    // --- Category change handler ---
     let ui_handle = ui.as_weak();
     ui.on_category_changed(move |idx| {
-        if let Some(ui) = ui_handle.upgrade() {
-            let index = idx as usize;
-            if index >= ranges.len() { return; }
-            
-            let (_, start, end) = ranges[index];
-            
-            // 1. Genera i caratteri Unicode validi nel range selezionato
-            let all_syms: Vec<SharedString> = (start..=end)
-                .filter_map(std::char::from_u32)
-                .map(|c| c.to_string().into())
-                .collect();
+        let Some(ui) = ui_handle.upgrade() else { return };
 
-            let total = all_syms.len();
+        let index = idx as usize;
+        let Some(&(_, start, end)) = RANGES.get(index) else { return };
 
-            // 2. Suddividi in righe da 10 per alimentare la ListView virtualizzata
-            // Usiamo chunks() per assicurarci che anche l'ultima riga parziale sia inclusa
-            let rows: Vec<ModelRc<SharedString>> = all_syms
-                .chunks(10)
-                .map(|chunk| {
-                    let row_data: Vec<SharedString> = chunk.to_vec();
-                    ModelRc::from(Rc::new(VecModel::from(row_data)))
-                })
-                .collect();
-            
-            ui.set_symbol_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
-            ui.set_status_text(format!("Range caricato: {} simboli", total).into());
-        }
+        // Show a loading hint before the heavy computation
+        ui.set_status_text("Loading...".into());
+
+        let rows = build_rows(start, end);
+        let total = rows.iter().map(|r| r.row_count()).sum::<usize>();
+
+        ui.set_symbol_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+        ui.set_status_text(format!("Range loaded: {} symbols", total).into());
     });
 
-    // Gestione del click per copiare negli appunti
+    // --- Symbol click handler: copy to clipboard ---
     let ui_click_handle = ui.as_weak();
+    let clipboard_ref = Rc::clone(&clipboard);
     ui.on_symbol_clicked(move |sym| {
-        if let Some(ref mut cb) = clipboard {
-            if let Ok(_) = cb.set_text(sym.to_string()) {
-                if let Some(ui) = ui_click_handle.upgrade() {
-                    ui.set_status_text(format!("Copiato negli appunti: {}", sym).into());
+        // FIX: use as_str() to avoid an unnecessary String allocation
+        if let Some(cb) = clipboard_ref.borrow_mut().as_mut() {
+            match cb.set_text(sym.as_str()) {
+                Ok(_) => {
+                    if let Some(ui) = ui_click_handle.upgrade() {
+                        // Show both the glyph and its Unicode codepoint
+                        let codepoint = sym
+                            .chars()
+                            .next()
+                            .map(|c| format!("U+{:04X}", c as u32))
+                            .unwrap_or_default();
+                        ui.set_status_text(
+                            format!("Copied to clipboard: {} ({})", sym, codepoint).into(),
+                        );
+                    }
                 }
+                // FIX: surface clipboard errors instead of silently swallowing them
+                Err(e) => eprintln!("Clipboard error: {e}"),
             }
         }
     });
 
-    // Carica la prima categoria all'avvio
+    // Load the first category on startup
     ui.invoke_category_changed(0);
 
     ui.run()
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clefs_range_count() {
+        // U+E050–U+E07F = 48 codepoints, all valid chars
+        let rows = build_rows(0xE050, 0xE07F);
+        let total: usize = rows.iter().map(|r| r.row_count()).sum();
+        assert_eq!(total, 48);
+    }
+
+    #[test]
+    fn test_rows_are_split_into_cols_of_10() {
+        let rows = build_rows(0xE050, 0xE07F); // 48 symbols → 5 rows
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].row_count(), 10);
+        assert_eq!(rows[4].row_count(), 8); // last partial row
+    }
+
+    #[test]
+    fn test_all_ranges_entry_spans_entire_smufl_pua() {
+        // "All ranges" entry must cover E000–F3FF
+        let (_, start, end) = RANGES[0];
+        assert_eq!(start, 0xE000);
+        assert_eq!(end, 0xF3FF);
+    }
+
+    #[test]
+    fn test_no_duplicate_range_entries() {
+        let mut seen = std::collections::HashSet::new();
+        for &(name, _, _) in RANGES {
+            assert!(seen.insert(name), "Duplicate range name: {name}");
+        }
+    }
 }
